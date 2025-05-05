@@ -1,0 +1,13 @@
+LICENSE
+README.md
+pyproject.toml
+setup.cfg
+src/qmioanalyzer/__init__.py
+src/qmioanalyzer/error_analyzer.py
+src/qmioanalyzer/utils.py
+src/qmioanalyzer.egg-info/PKG-INFO
+src/qmioanalyzer.egg-info/SOURCES.txt
+src/qmioanalyzer.egg-info/dependency_links.txt
+src/qmioanalyzer.egg-info/not-zip-safe
+src/qmioanalyzer.egg-info/requires.txt
+src/qmioanalyzer.egg-info/top_level.txt
