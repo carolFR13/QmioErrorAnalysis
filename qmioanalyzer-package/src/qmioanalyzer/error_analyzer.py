@@ -1,4 +1,5 @@
 import numpy as np
+from collections import Counter, defaultdict
 
 class ErrorAnalyzer:
     '''
@@ -36,13 +37,15 @@ class ErrorAnalyzer:
         
     '''
 
-    def __init__(self, repetition_period, init_state, measurements, verbose=0):
+    def __init__(self, repetition_period,  measurements, threshold = 0.0005, init_state = None, 
+                 verbose = 0, center_time=None, window=None):
         """
         Parameters:
         - repetition_period: float, time between measurements in s.
         - init_state: initialization of the state : 
                       0 -> if nothing is applied
                       1 -> if an x gate is applied
+                      None -> if the repetition_period is less than 500 mus
         - measurements: array of measured eigenvalues (of type string).
         - verbose : parameter to control the explanation given of the analysis.
                      0 -> no explanation.
@@ -52,9 +55,28 @@ class ErrorAnalyzer:
 
         self.repetition_period = repetition_period
         self.init_state = init_state
-        self.measurements = measurements
+
+        # Apply time window selection if specified
+        if center_time is not None and window is not None:
+            # Create time array for original measurements
+            times = np.array([i * repetition_period for i in range(len(measurements))])
+
+            t_start, t_end = center_time + window[0], center_time + window[1]
+            
+            # Create selection mask
+            sel = (times >= t_start) & (times <= t_end)
+            
+            # Apply selection to measurements
+            self.measurements = [measurements[i] for i in range(len(measurements)) if sel[i]]
+            self.time_offset = np.where(sel)[0][0] if np.any(sel) else 0  # Store offset for time calculation
+        else:
+            self.measurements = measurements
+            self.time_offset = 0
+
         self.errors = {} 
         self.analysis_type = None  # Store the type of analysis used
+
+        self.threshold = threshold  # threshold to determine high or low period
 
         self.verbose = verbose  # verbosity level
     
@@ -62,7 +84,7 @@ class ErrorAnalyzer:
         '''
         Method to compute the number of errors according to each case.
         '''
-        if self.repetition_period >= 0.0005:
+        if self.repetition_period >= self.threshold:
             self.analysis_type = "high_period"
             self._analyze_high_period()
         else:
@@ -80,29 +102,57 @@ class ErrorAnalyzer:
 
         num_qubits = len(self.measurements[0])
         errors_per_qubit = np.zeros(num_qubits)
+        error_pattern_histogram = Counter()
 
 
         # we initialize the arrays to save the results
         self.errors["high_period_errors"] = {
-            "error_counts": [],
+            "total_errors": [],
             "times": [],  # array to save the corresponding time to each measurement
             "errors_per_qubit": errors_per_qubit
         }
 
+
         for i, measurement in enumerate(self.measurements):
             error_count = 0  
+            errored_qubits = []
+
             for qubit_index, bit in enumerate(measurement):
                 if bit != expected_value:
                     errors_per_qubit[qubit_index] += 1  # Contamos el error para ese qubit
                     error_count += 1  
+                    errored_qubits.append(qubit_index)
 
+            error_key = tuple(errored_qubits)
+            error_pattern_histogram[error_key] += 1
 
-            measurement_time = i * self.repetition_period # we compute the time from the index and the repetition_period
-            self.errors["high_period_errors"]["error_counts"].append(error_count)
+            measurement_time = (i + self.time_offset) * self.repetition_period # we compute the time from the index and the repetition_period
+            self.errors["high_period_errors"]["total_errors"].append(error_count)
             self.errors["high_period_errors"]["times"].append(measurement_time)
         
         self.errors["high_period_errors"]["states"] = [state for state in self.measurements]
+
+        total_counts = len(self.measurements) 
+        error_patterns = dict(error_pattern_histogram)
+        p_qubit_error = np.array(errors_per_qubit) /total_counts # Probability of error per qubit
+        theoretical_histogram = {}
+        
+        for qubit_tuple, count in error_patterns.items():
+            # Compute independent probability for this combination
+            prob = 1.0
+            for q in range(len(p_qubit_error)):
+                if q in qubit_tuple:
+                    prob *= p_qubit_error[q]  # P(error)
+                else:
+                    prob *= (1 - p_qubit_error[q])  # P(no error)
+                
+            theoretical_histogram[qubit_tuple] = prob * total_counts  # scale to match total counts
+
+        
+        self.errors["high_period_errors"]["error_patterns"] = error_patterns
+        self.errors["high_period_errors"]["theoretical_histogram"] = theoretical_histogram
         self.errors["high_period_errors"]["errors_per_qubit"] = errors_per_qubit.tolist()
+        self.total_counts = total_counts  # Total number of measurements
     
     def _analyze_low_period(self):
         '''
@@ -118,6 +168,7 @@ class ErrorAnalyzer:
         expected_measurements = self._compute_expected_sequences()
         num_qubits = len(self.measurements[0])
         errors_per_qubit = np.zeros(num_qubits)
+        error_pattern_histogram = Counter()
 
         # we initialize the arrays to save the results 
         self.errors["low_period_errors"] = {
@@ -128,11 +179,11 @@ class ErrorAnalyzer:
                     "errors_per_qubit": errors_per_qubit
                 }
 
-
         for i, (expected, measured) in enumerate(zip(expected_measurements, self.measurements[1:])):
             
             true_errors = 0
             false_errors = 0
+            errored_qubits = []
 
             for qubit_index, (e, m) in enumerate(zip(expected, measured)):
                 #print(e,m)
@@ -142,20 +193,46 @@ class ErrorAnalyzer:
                 elif e == '1' and m == '0':
                     false_errors += 1
                     errors_per_qubit[qubit_index] += 1
+                if (e == '0' and m == '1') or (e == '1' and m == '0'):
+                    errored_qubits.append(qubit_index)
 
-            measurement_time = i * self.repetition_period
+            measurement_time =(i + self.time_offset) * self.repetition_period
+            error_key = tuple(errored_qubits)
+            error_pattern_histogram[error_key] += 1
             
             self.errors["low_period_errors"]["true_errors"].append(true_errors)
             self.errors["low_period_errors"]["false_errors"].append(false_errors)
             self.errors["low_period_errors"]["total_errors"].append(true_errors + false_errors)
             self.errors["low_period_errors"]["times"].append(measurement_time)
 
+
         self.errors["low_period_errors"]["states"] = self.measurements[1:]
         self.errors["low_period_errors"]["expected"] = expected_measurements
         self.errors["low_period_errors"]["errors_per_qubit"] = errors_per_qubit.tolist()
 
 
-    
+        total_counts = len(self.measurements) - 1  # Total number of measurements minus the first one
+        error_patterns = dict(error_pattern_histogram)
+        p_qubit_error = np.array(errors_per_qubit) /total_counts # Probability of error per qubit
+        theoretical_histogram = {}
+        
+        for qubit_tuple, count in error_patterns.items():
+            # Compute independent probability for this combination
+            prob = 1.0
+            for q in range(len(p_qubit_error)):
+                if q in qubit_tuple:
+                    prob *= p_qubit_error[q]  # P(error)
+                else:
+                    prob *= (1 - p_qubit_error[q])  # P(no error)
+                
+            theoretical_histogram[qubit_tuple] = prob * total_counts  # scale to match total counts
+
+        
+        self.errors["low_period_errors"]["error_patterns"] = error_patterns
+        self.errors["low_period_errors"]["theoretical_histogram"] = theoretical_histogram
+        self.total_counts = len(self.measurements) - 1  # Total number of measurements minus the first one
+
+
     def _compute_expected_sequences(self):
         '''
         Method to compute the expected values of the bits from 
@@ -192,14 +269,14 @@ class ErrorAnalyzer:
         
         if self.analysis_type == "high_period":
             print("The analysis was performed using the *high repetition period* approach ")
-            print("(repetition_period ≥ 500 μs). The error dictionary contains:\n")
-            print(f"- Key: 'high_period_errors' → Returns two arrays with {len(self.errors['high_period_errors']['error_counts'])} measurements:")
+            print(f"(repetition_period ≥ {self.threshold*1e-6} μs). The error dictionary contains:\n")
+            print(f"- Key: 'high_period_errors' → Returns two arrays with {len(self.errors['high_period_errors']['total_errors'])} measurements:")
             print("  - 'error_counts': Array with the number of errors associated with each measurement.")
             print("  - 'times': Array with the times of each measurement (calculated as i * repetition_period).")
             print("\n")
         else:
             print("The analysis was performed using the *low repetition period* approach ")
-            print("(repetition_period < 500 μs). The error dictionary contains:\n")
+            print(f"(repetition_period < {self.threshold*1e-6} μs). The error dictionary contains:\n")
             print(f"- Key: 'low_period_errors' → A dictionary with {len(self.errors['low_period_errors']['true_errors'])} measurements with the following subkeys:")
             print("  - 'true_errors': Array with the number of true errors (0 expected, 1 measured) for each measurement.")
             print("  - 'false_errors': Array with the number of false errors (1 expected, 0 measured) for each measurement.")
