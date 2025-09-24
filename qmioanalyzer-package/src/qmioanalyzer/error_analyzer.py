@@ -1,5 +1,7 @@
+from copy import error
 import numpy as np
 from collections import Counter, defaultdict
+from itertools import combinations
 
 class ErrorAnalyzer:
     '''
@@ -38,7 +40,7 @@ class ErrorAnalyzer:
     '''
 
     def __init__(self, repetition_period,  measurements, threshold = 0.0005, init_state = None, 
-                 verbose = 0, center_time=None, window=None):
+                 verbose = 0, center_time=None, window=None, external_error_probs=None):
         """
         Parameters:
         - repetition_period: float, time between measurements in s.
@@ -51,10 +53,17 @@ class ErrorAnalyzer:
                      0 -> no explanation.
                      1 -> short  summary of the returned dictionary
                      2 -> extended summary of the result
+        - center_time: center time for windowing when a long measurement is done.
+        - window: time window for selection
+        - external_error_probs: array-like, optional. External probabilities for each qubit.
+                           If provided, these will be used instead of computed probabilities
+                           for theoretical histogram calculation.
+
         """
 
         self.repetition_period = repetition_period
         self.init_state = init_state
+        self.external_error_probs = external_error_probs
 
         # Apply time window selection if specified
         if center_time is not None and window is not None:
@@ -134,19 +143,24 @@ class ErrorAnalyzer:
 
         total_counts = len(self.measurements) 
         error_patterns = dict(error_pattern_histogram)
-        p_qubit_error = np.array(errors_per_qubit) /total_counts # Probability of error per qubit
+        p_qubit_error = self._get_error_probabilities(errors_per_qubit, total_counts)
+
         theoretical_histogram = {}
+        num_qubits = len(p_qubit_error)
         
-        for qubit_tuple, count in error_patterns.items():
-            # Compute independent probability for this combination
-            prob = 1.0
-            for q in range(len(p_qubit_error)):
-                if q in qubit_tuple:
-                    prob *= p_qubit_error[q]  # P(error)
-                else:
-                    prob *= (1 - p_qubit_error[q])  # P(no error)
+        for r in range(num_qubits + 1):  # 0 errors, 1 error, 2 errors, ..., all errors
+            for qubit_combo in combinations(range(num_qubits), r):
+                qubit_tuple = tuple(qubit_combo)
                 
-            theoretical_histogram[qubit_tuple] = prob * total_counts  # scale to match total counts
+                # Calculate probability for this specific combination
+                prob = 1.0
+                for q in range(num_qubits):
+                    if q in qubit_tuple:
+                        prob *= p_qubit_error[q]      # P(this qubit has error)
+                    else:
+                        prob *= (1 - p_qubit_error[q])  # P(this qubit has no error)
+                
+                theoretical_histogram[qubit_tuple] = prob * total_counts
 
         
         self.errors["high_period_errors"]["error_patterns"] = error_patterns
@@ -213,26 +227,60 @@ class ErrorAnalyzer:
 
         total_counts = len(self.measurements) - 1  # Total number of measurements minus the first one
         error_patterns = dict(error_pattern_histogram)
-        p_qubit_error = np.array(errors_per_qubit) /total_counts # Probability of error per qubit
-        theoretical_histogram = {}
+        p_qubit_error = self._get_error_probabilities(errors_per_qubit, total_counts)
         
-        for qubit_tuple, count in error_patterns.items():
-            # Compute independent probability for this combination
-            prob = 1.0
-            for q in range(len(p_qubit_error)):
-                if q in qubit_tuple:
-                    prob *= p_qubit_error[q]  # P(error)
-                else:
-                    prob *= (1 - p_qubit_error[q])  # P(no error)
-                
-            theoretical_histogram[qubit_tuple] = prob * total_counts  # scale to match total counts
+        theoretical_histogram = {}
+        num_qubits = len(p_qubit_error)
+
+        for r in range(num_qubits + 1):  # 0 errors, 1 error, 2 errors, ..., all errors
+                for qubit_combo in combinations(range(num_qubits), r):
+                    qubit_tuple = tuple(qubit_combo)
+                    
+                    # Calculate probability for this specific combination
+                    prob = 1.0
+                    for q in range(num_qubits):
+                        if q in qubit_tuple:
+                            prob *= p_qubit_error[q]      # P(this qubit has error)
+                        else:
+                            prob *= (1 - p_qubit_error[q])  # P(this qubit has no error)
+                    
+                    theoretical_histogram[qubit_tuple] = prob * total_counts
+
 
         
         self.errors["low_period_errors"]["error_patterns"] = error_patterns
         self.errors["low_period_errors"]["theoretical_histogram"] = theoretical_histogram
         self.total_counts = len(self.measurements) - 1  # Total number of measurements minus the first one
 
-
+    def _get_error_probabilities(self, errors_per_qubit, total_counts):
+        """
+        Get error probabilities either from external source or computed from data.
+        
+        Parameters:
+        - errors_per_qubit: array of error counts per qubit
+        - total_counts: total number of measurements
+        
+        Returns:
+        - p_qubit_error: array of error probabilities for each qubit
+        """
+        if self.external_error_probs is not None:
+            # Use external probabilities
+            p_qubit_error = np.array(self.external_error_probs)
+            
+            # Validate dimensions
+            if len(p_qubit_error) != len(errors_per_qubit):
+                raise ValueError(f"External error probabilities length ({len(p_qubit_error)}) "
+                            f"must match number of qubits ({len(errors_per_qubit)})")
+            
+            # Validate probability range
+            if np.any(p_qubit_error < 0) or np.any(p_qubit_error > 1):
+                raise ValueError("External error probabilities must be between 0 and 1")
+                
+            return p_qubit_error
+        else:
+            # Compute from observed data
+            return np.array(errors_per_qubit) / total_counts
+    
     def _compute_expected_sequences(self):
         '''
         Method to compute the expected values of the bits from 

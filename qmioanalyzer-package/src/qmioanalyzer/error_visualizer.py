@@ -65,7 +65,6 @@ class ErrorVisualizer:
         type can be "theoretical", "experimental" or "both".
         '''
 
-
         data = self._get_error_data(period, obj)
 
         if type == "theoretical":
@@ -78,10 +77,22 @@ class ErrorVisualizer:
 
             all_keys = set(patterns_exp.keys()).union(patterns_theo.keys())
             total_exp = sum(patterns_exp.values())
+            total_theo = sum(patterns_theo.values())
 
-            filtered_keys = [
-                k for k in all_keys if patterns_exp.get(k, 0) / total_exp >= threshold
-            ]
+            print(f"[DEBUG] Experimental keys: {len(patterns_exp.keys())}")
+            print(f"[DEBUG] Theoretical keys: {len(patterns_theo.keys())}")
+            print(f"[DEBUG] All keys: {len(all_keys)}")
+            print(f"[DEBUG] Total exp: {total_exp}, Total theo: {total_theo}")
+            
+            # Filter based on EITHER experimental OR theoretical significance
+            filtered_keys = []
+            for k in all_keys:
+                exp_freq = patterns_exp.get(k, 0) / total_exp if total_exp > 0 else 0
+                theo_freq = patterns_theo.get(k, 0) / total_theo if total_theo > 0 else 0
+                
+                # Include if either experimental OR theoretical exceeds threshold
+                if exp_freq >= threshold or theo_freq >= threshold:
+                    filtered_keys.append(k)
 
             filtered_keys = sorted(filtered_keys, key=lambda k: patterns_exp.get(k, 0), reverse=True)
 
