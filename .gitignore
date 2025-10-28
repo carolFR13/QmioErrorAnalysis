@@ -6,6 +6,7 @@ qmio-venv
 tests
 data
 deprecated_notebooks
+*.pdf
 
 
 # Byte-compiled / optimized / DLL files
