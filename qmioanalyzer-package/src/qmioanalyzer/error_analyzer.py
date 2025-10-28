@@ -39,7 +39,7 @@ class ErrorAnalyzer:
         
     '''
 
-    def __init__(self, repetition_period,  measurements, threshold = 0.0005, init_state = None, 
+    def __init__(self, repetition_period,  measurements, threshold = 0.00015, init_state = None, 
                  verbose = 0, center_time=None, window=None, external_error_probs=None):
         """
         Parameters:
@@ -99,74 +99,88 @@ class ErrorAnalyzer:
         else:
             self.analysis_type = "low_period"
             self._analyze_low_period()
-    
+
+
+
+
     def _analyze_high_period(self):
+
         '''
         Method to compute the number of errors when there is enough time
         between measurements for the state to go back to |0>, i.e.,
-        when repetition_period >= 500 mus. 
+        when repetition_period >= 150 mus. 
+
+        Theoretical histograms are only computed if the number of qubits is 
+        less than 7.
         '''
-        
+            
+
         expected_value = '0' if self.init_state == 0 else '1'
-
+        num_measurements = len(self.measurements)
         num_qubits = len(self.measurements[0])
-        errors_per_qubit = np.zeros(num_qubits)
+
+        # Join all bitstrings and convert ASCII '0'/'1' -> integers 0/1
+        flat = np.frombuffer(''.join(self.measurements).encode('ascii'), dtype=np.uint8) - ord('0')
+
+        # Reshape into (n_measurements, n_qubits)
+        meas_array = flat.reshape(num_measurements, num_qubits)
+
+        # Expected array: all 0s or all 1s
+        expected_bit = 0 if expected_value == '0' else 1
+        expected_array = np.full_like(meas_array, expected_bit, dtype=np.uint8)
+
+        # Compute mismatch mask (1 if error, 0 if correct)
+        error_mask = (meas_array != expected_array).astype(np.uint8)
+
+        # Compute total errors per measurement (sum over qubits)
+        total_errors = error_mask.sum(axis=1)
+
+        # Compute errors per qubit (sum over measurements)
+        errors_per_qubit = error_mask.sum(axis=0)
+
+        # Compute times
+        times = (np.arange(num_measurements) + self.time_offset) * self.repetition_period
+
+        # Generate histogram of error patterns (only if small enough)
         error_pattern_histogram = Counter()
+        if num_qubits <= 6:
+            for mask in error_mask:
+                errored_qubits = tuple(np.nonzero(mask)[0])
+                error_pattern_histogram[errored_qubits] += 1
+        else:
+            error_pattern_histogram = None  # Skip to save time
 
-
-        # we initialize the arrays to save the results
+        # Build output
         self.errors["high_period_errors"] = {
-            "total_errors": [],
-            "times": [],  # array to save the corresponding time to each measurement
-            "errors_per_qubit": errors_per_qubit
+            "total_errors": total_errors.tolist(),
+            "times": times.tolist(),
+            "errors_per_qubit": errors_per_qubit.tolist(),
+            "states": self.measurements
         }
 
+        # If feasible, compute theoretical histogram
+        if num_qubits <= 6:
+            total_counts = num_measurements
+            p_qubit_error = self._get_error_probabilities(errors_per_qubit, total_counts)
 
-        for i, measurement in enumerate(self.measurements):
-            error_count = 0  
-            errored_qubits = []
+            theoretical_histogram = {}
+            for r in range(num_qubits + 1):
+                for qubit_combo in combinations(range(num_qubits), r):
+                    prob = np.prod([
+                        p_qubit_error[q] if q in qubit_combo else (1 - p_qubit_error[q])
+                        for q in range(num_qubits)
+                    ])
+                    theoretical_histogram[qubit_combo] = prob * total_counts
 
-            for qubit_index, bit in enumerate(measurement):
-                if bit != expected_value:
-                    errors_per_qubit[qubit_index] += 1  # Contamos el error para ese qubit
-                    error_count += 1  
-                    errored_qubits.append(qubit_index)
+            self.errors["high_period_errors"]["error_patterns"] = dict(error_pattern_histogram)
+            self.errors["high_period_errors"]["theoretical_histogram"] = theoretical_histogram
 
-            error_key = tuple(errored_qubits)
-            error_pattern_histogram[error_key] += 1
+        else:
+            # If skipped due to high qubit count
+            self.errors["high_period_errors"]["error_patterns"] = None
+            self.errors["high_period_errors"]["theoretical_histogram"] = None
 
-            measurement_time = (i + self.time_offset) * self.repetition_period # we compute the time from the index and the repetition_period
-            self.errors["high_period_errors"]["total_errors"].append(error_count)
-            self.errors["high_period_errors"]["times"].append(measurement_time)
-        
-        self.errors["high_period_errors"]["states"] = [state for state in self.measurements]
-
-        total_counts = len(self.measurements) 
-        error_patterns = dict(error_pattern_histogram)
-        p_qubit_error = self._get_error_probabilities(errors_per_qubit, total_counts)
-
-        theoretical_histogram = {}
-        num_qubits = len(p_qubit_error)
-        
-        for r in range(num_qubits + 1):  # 0 errors, 1 error, 2 errors, ..., all errors
-            for qubit_combo in combinations(range(num_qubits), r):
-                qubit_tuple = tuple(qubit_combo)
-                
-                # Calculate probability for this specific combination
-                prob = 1.0
-                for q in range(num_qubits):
-                    if q in qubit_tuple:
-                        prob *= p_qubit_error[q]      # P(this qubit has error)
-                    else:
-                        prob *= (1 - p_qubit_error[q])  # P(this qubit has no error)
-                
-                theoretical_histogram[qubit_tuple] = prob * total_counts
-
-        
-        self.errors["high_period_errors"]["error_patterns"] = error_patterns
-        self.errors["high_period_errors"]["theoretical_histogram"] = theoretical_histogram
-        self.errors["high_period_errors"]["errors_per_qubit"] = errors_per_qubit.tolist()
-        self.total_counts = total_counts  # Total number of measurements
+        self.total_counts = num_measurements
     
     def _analyze_low_period(self):
         '''
@@ -177,81 +191,76 @@ class ErrorAnalyzer:
 
         A classification of the errors is made here in True and False errors,
         according to the already given definitions.
+
+        Theoretical histograms are only computed if the number of qubits is
+        less than 7.
         '''
 
-        expected_measurements = self._compute_expected_sequences()
+        num_measurements = len(self.measurements)
         num_qubits = len(self.measurements[0])
-        errors_per_qubit = np.zeros(num_qubits)
-        error_pattern_histogram = Counter()
 
-        # we initialize the arrays to save the results 
-        self.errors["low_period_errors"] = {
-                    "true_errors": [],
-                    "false_errors": [],
-                    "total_errors": [],
-                    "times": [],
-                    "errors_per_qubit": errors_per_qubit
-                }
+        # Convert measurements to NumPy array
+        meas_array = np.frombuffer(''.join(self.measurements).encode('ascii'), dtype=np.uint8) - ord('0')
+        meas_array = meas_array.reshape(num_measurements, num_qubits)
 
-        for i, (expected, measured) in enumerate(zip(expected_measurements, self.measurements[1:])):
-            
-            true_errors = 0
-            false_errors = 0
-            errored_qubits = []
+        # Compute expected measurements
+        expected_strings = self._compute_expected_sequences()
+        expected_array = np.frombuffer(''.join(expected_strings).encode('ascii'), dtype=np.uint8) - ord('0')
+        expected_array = expected_array.reshape(num_measurements - 1, num_qubits)
 
-            for qubit_index, (e, m) in enumerate(zip(expected, measured)):
-                #print(e,m)
-                if e == '0' and m == '1':
-                    true_errors += 1
-                    errors_per_qubit[qubit_index] += 1
-                elif e == '1' and m == '0':
-                    false_errors += 1
-                    errors_per_qubit[qubit_index] += 1
-                if (e == '0' and m == '1') or (e == '1' and m == '0'):
-                    errored_qubits.append(qubit_index)
+        # Compute masks for true/false errors
+        true_errors_mask = (expected_array == 0) & (meas_array[1:] == 1)
+        false_errors_mask = (expected_array == 1) & (meas_array[1:] == 0)
 
-            measurement_time =(i + self.time_offset) * self.repetition_period
-            error_key = tuple(errored_qubits)
-            error_pattern_histogram[error_key] += 1
-            
-            self.errors["low_period_errors"]["true_errors"].append(true_errors)
-            self.errors["low_period_errors"]["false_errors"].append(false_errors)
-            self.errors["low_period_errors"]["total_errors"].append(true_errors + false_errors)
-            self.errors["low_period_errors"]["times"].append(measurement_time)
+        # Total errors per measurement
+        true_errors = true_errors_mask.sum(axis=1)
+        false_errors = false_errors_mask.sum(axis=1)
+        total_errors = true_errors + false_errors
 
+        # Errors per qubit
+        errors_per_qubit = (true_errors_mask | false_errors_mask).sum(axis=0)
 
-        self.errors["low_period_errors"]["states"] = self.measurements[1:]
-        self.errors["low_period_errors"]["expected"] = expected_measurements
-        self.errors["low_period_errors"]["errors_per_qubit"] = errors_per_qubit.tolist()
+        # Compute times
+        times = (np.arange(num_measurements - 1) + self.time_offset) * self.repetition_period
 
+        # Generate histogram of error patterns (only if small number of qubits)
+        error_pattern_histogram = None
+        if num_qubits <= 6:
+            error_pattern_histogram = Counter()
+            for mask in (true_errors_mask | false_errors_mask):
+                error_pattern_histogram[tuple(np.nonzero(mask)[0])] += 1
 
-        total_counts = len(self.measurements) - 1  # Total number of measurements minus the first one
-        error_patterns = dict(error_pattern_histogram)
-        p_qubit_error = self._get_error_probabilities(errors_per_qubit, total_counts)
-        
-        theoretical_histogram = {}
-        num_qubits = len(p_qubit_error)
-
-        for r in range(num_qubits + 1):  # 0 errors, 1 error, 2 errors, ..., all errors
+        # Compute theoretical histogram only if num_qubits <= 6
+        theoretical_histogram = None
+        if num_qubits <= 6:
+            total_counts = num_measurements - 1
+            p_qubit_error = self._get_error_probabilities(errors_per_qubit, total_counts)
+            theoretical_histogram = {}
+            for r in range(num_qubits + 1):
                 for qubit_combo in combinations(range(num_qubits), r):
-                    qubit_tuple = tuple(qubit_combo)
-                    
-                    # Calculate probability for this specific combination
-                    prob = 1.0
-                    for q in range(num_qubits):
-                        if q in qubit_tuple:
-                            prob *= p_qubit_error[q]      # P(this qubit has error)
-                        else:
-                            prob *= (1 - p_qubit_error[q])  # P(this qubit has no error)
-                    
-                    theoretical_histogram[qubit_tuple] = prob * total_counts
+                    prob = np.prod([
+                        p_qubit_error[q] if q in qubit_combo else (1 - p_qubit_error[q])
+                        for q in range(num_qubits)
+                    ])
+                    theoretical_histogram[qubit_combo] = prob * total_counts
+
+        # Store results
+        self.errors["low_period_errors"] = {
+            "true_errors": true_errors.tolist(),
+            "false_errors": false_errors.tolist(),
+            "total_errors": total_errors.tolist(),
+            "times": times.tolist(),
+            "errors_per_qubit": errors_per_qubit.tolist(),
+            "states": self.measurements[1:],
+            "expected": expected_strings,
+            "error_patterns": dict(error_pattern_histogram) if error_pattern_histogram else None,
+            "theoretical_histogram": theoretical_histogram
+        }
+
+        self.total_counts = num_measurements - 1
 
 
-        
-        self.errors["low_period_errors"]["error_patterns"] = error_patterns
-        self.errors["low_period_errors"]["theoretical_histogram"] = theoretical_histogram
-        self.total_counts = len(self.measurements) - 1  # Total number of measurements minus the first one
-
+    
     def _get_error_probabilities(self, errors_per_qubit, total_counts):
         """
         Get error probabilities either from external source or computed from data.
@@ -294,6 +303,128 @@ class ErrorAnalyzer:
             expected_sequences.append(expected)
             previous = self.measurements[i]  # we use the measurement as a reference 
         return expected_sequences
+
+
+    def get_qubit_error_probabilities(self, center_time, window=(-0.01, 0.015), bin_size=4, qubit: int = None):
+        """
+        Compute error probabilities per qubit in a given time window, binned over a fixed number of measurements.
+
+        This version supports both high_period and low_period analysis modes:
+
+        - high_period: compares each measurement to the fixed init_state.
+        - low_period: compares each measurement (from index 1) to the expected sequence
+                      computed from the previous measurement (same logic as _analyze_low_period).
+
+        Parameters:
+        - center_time: float, center of the time window (absolute time, seconds)
+        - window: tuple (t_before, t_after) relative to center_time
+        - bin_size: int, number of measurements per bin (if selected measurements < bin_size we return a single bin)
+        - qubit: optional int, index of a single qubit to compute. If None, compute for all qubits.
+
+        Returns:
+            times_bin: np.ndarray of time per bin (center)
+            p_qubits_bin: np.ndarray (n_bins, n_qubits) of average error probability per qubit
+                          or np.ndarray (n_bins,) if qubit is specified
+        """
+        if self.analysis_type is None:
+            raise RuntimeError("Run analyze_errors() first to determine analysis_type.")
+
+        # Convert measurements to array
+        num_measurements = len(self.measurements)
+        if num_measurements == 0:
+            return np.array([]), np.array([])
+
+        n_qubits = len(self.measurements[0])
+        meas_array = np.frombuffer(''.join(self.measurements).encode('ascii'), dtype=np.uint8) - ord('0')
+        meas_array = meas_array.reshape(num_measurements, n_qubits)
+
+        if self.analysis_type == "high_period":
+            # expected bit for high_period mode must be provided
+            if self.init_state is None:
+                raise RuntimeError("init_state must be set for high_period analysis to compute error probabilities.")
+            expected_bit = 0 if self.init_state == 0 else 1
+            expected_array = np.full_like(meas_array, expected_bit, dtype=np.uint8)
+
+            # Compute error mask (1 if error, 0 if correct)
+            error_mask = (meas_array != expected_array).astype(np.uint8)
+
+            # Absolute times for the measurements (accounting for any time_offset from constructor selection)
+            times = (np.arange(num_measurements) + self.time_offset) * self.repetition_period
+
+        elif self.analysis_type == "low_period":
+            # low_period: expected sequence depends on previous measurement -> compares meas_array[1:] with expected_array
+            if num_measurements < 2:
+                return np.array([]), np.array([])
+
+            expected_strings = self._compute_expected_sequences()  # length num_measurements-1
+            expected_array = np.frombuffer(''.join(expected_strings).encode('ascii'), dtype=np.uint8) - ord('0')
+            expected_array = expected_array.reshape(num_measurements - 1, n_qubits)
+
+            # observed for comparison are meas_array[1:]
+            observed = meas_array[1:, :]
+
+            # true/false error masks as in _analyze_low_period
+            true_errors_mask = (expected_array == 0) & (observed == 1)
+            false_errors_mask = (expected_array == 1) & (observed == 0)
+
+            error_mask = (true_errors_mask | false_errors_mask).astype(np.uint8)
+
+            # times correspond to measurements 1..end (shifted)
+            times = (np.arange(num_measurements - 1) + self.time_offset) * self.repetition_period
+
+        else:
+            raise RuntimeError(f"Unknown analysis_type: {self.analysis_type}")
+
+        # Select measurements in requested window
+        tmin = center_time + window[0]
+        tmax = center_time + window[1]
+        mask = (times >= tmin) & (times <= tmax)
+
+        selected_count = np.count_nonzero(mask)
+        print("Selected measurements:", selected_count)
+
+        if selected_count == 0:
+            return np.array([]), np.array([])
+
+        selected_errors = error_mask[mask]
+        selected_times = times[mask]
+
+        # If user requested a single qubit, reduce shape
+        if qubit is not None:
+            if qubit < 0 or qubit >= n_qubits:
+                raise IndexError("qubit index out of range")
+            selected_errors_single = selected_errors[:, qubit]
+            if selected_errors_single.shape[0] < bin_size:
+                n_bins = 1
+            else:
+                n_bins = selected_errors_single.shape[0] // bin_size
+            times_bin = np.zeros(n_bins)
+            p_bin = np.zeros(n_bins)
+            for i in range(n_bins):
+                start = i * bin_size
+                end = start + bin_size if n_bins > 1 else selected_errors_single.shape[0]
+                block = selected_errors_single[start:end]
+                p_bin[i] = block.mean()
+                times_bin[i] = selected_times[start:end].mean()
+            return times_bin, p_bin
+
+        # Multi-qubit case
+        if selected_errors.shape[0] < bin_size:
+            n_bins = 1
+        else:
+            n_bins = selected_errors.shape[0] // bin_size
+
+        p_qubits_bin = np.zeros((n_bins, n_qubits))
+        times_bin = np.zeros(n_bins)
+        for i in range(n_bins):
+            start = i * bin_size
+            end = start + bin_size if n_bins > 1 else selected_errors.shape[0]
+            block = selected_errors[start:end, :]
+            p_qubits_bin[i, :] = block.mean(axis=0)
+            times_bin[i] = selected_times[start:end].mean()
+
+        return times_bin, p_qubits_bin
+
     
     def get_errors(self):
         '''

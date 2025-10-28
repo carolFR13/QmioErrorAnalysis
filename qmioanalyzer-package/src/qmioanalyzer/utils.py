@@ -52,16 +52,25 @@ def read_data(filename):
                             init_state = val
                 continue
 
-            # skip header line ("Batch Shot State AbsTime[s]")
-            if line.strip().lower().startswith(("batch", "repetition", "state")):
+            # Skip header lines - handle both space and tab separated
+            line_lower = line.strip().lower()
+            if (line_lower.startswith(("batch", "repetition", "state")) or 
+                "state" in line_lower and "abstime" in line_lower):
                 continue  
 
-            parts = line.strip().split()
+            # Parse data lines - handle both space and tab separation
+            parts = line.strip().split()  # This handles both spaces and tabs
+            
             if len(parts) == 2:
-                # old format: [index, bitstring]
-                bits.append(parts[1])
+                # Format: State AbsTime[s] (tab or space separated)
+                try:
+                    bits.append(parts[0])  # State is first column
+                    abstime.append(float(parts[1]))  # AbsTime is second column
+                except Exception:
+                    # fallback: treat as old format [index, bitstring]
+                    bits.append(parts[1])
             elif len(parts) >= 3:
-                # new format: Batch Shot State AbsTime[s]
+                # Format: Batch Shot State AbsTime[s] or other multi-column
                 try:
                     batch.append(int(parts[0]))
                     shot.append(int(parts[1]))
@@ -69,8 +78,19 @@ def read_data(filename):
                     if len(parts) > 3:
                         abstime.append(float(parts[3]))
                 except Exception:
-                    # fallback: only bits
-                    bits.append(parts[2])
+                    # fallback: assume state is in appropriate column
+                    if len(parts) == 3:
+                        # Could be: State AbsTime[s] with extra column
+                        bits.append(parts[0])
+                        try:
+                            abstime.append(float(parts[1]))
+                        except:
+                            pass
+                    else:
+                        bits.append(parts[2])  # default to third column
+            elif len(parts) == 1:
+                # Single column - just the state
+                bits.append(parts[0])
 
     extra = {}
     if batch:   extra["batch"] = np.array(batch)
@@ -78,5 +98,3 @@ def read_data(filename):
     if abstime: extra["abstime"] = np.array(abstime)
 
     return np.array(bits), repetition_period, init_state, backend, extra
-
-
